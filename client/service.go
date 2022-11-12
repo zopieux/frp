@@ -44,6 +44,11 @@ import (
 	"github.com/fatedier/frp/pkg/util/xlog"
 )
 
+type FrpCallback interface {
+	LoggedIn(localAddr string, remoteAddr string)
+	Connected(proxyName string, remoteAddr string)
+}
+
 func init() {
 	crypto.DefaultSalt = "frp"
 	rand.Seed(time.Now().UnixNano())
@@ -79,14 +84,11 @@ type Service struct {
 	ctx context.Context
 	// call cancel to stop service
 	cancel context.CancelFunc
+
+	callback FrpCallback
 }
 
-func NewService(
-	cfg config.ClientCommonConf,
-	pxyCfgs map[string]config.ProxyConf,
-	visitorCfgs map[string]config.VisitorConf,
-	cfgFile string,
-) (svr *Service, err error) {
+func NewService(cfg config.ClientCommonConf, pxyCfgs map[string]config.ProxyConf, visitorCfgs map[string]config.VisitorConf, cfgFile string, callback FrpCallback, ) (svr *Service, err error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	svr = &Service{
 		authSetter:  auth.NewAuthSetter(cfg.ClientConfig),
@@ -97,6 +99,7 @@ func NewService(
 		exit:        0,
 		ctx:         xlog.NewContext(ctx, xlog.New()),
 		cancel:      cancel,
+		callback:    callback,
 	}
 	return
 }
@@ -139,10 +142,11 @@ func (svr *Service) Run() error {
 			util.RandomSleep(10*time.Second, 0.9, 1.1)
 		} else {
 			// login success
-			ctl := NewControl(svr.ctx, svr.runID, conn, session, svr.cfg, svr.pxyCfgs, svr.visitorCfgs, svr.serverUDPPort, svr.authSetter)
+			ctl := NewControl(svr.ctx, svr.runID, conn, session, svr.cfg, svr.pxyCfgs, svr.visitorCfgs, svr.serverUDPPort, svr.authSetter, svr.callback)
 			ctl.Run()
 			svr.ctlMu.Lock()
 			svr.ctl = ctl
+			svr.callback.LoggedIn(session.LocalAddr().String(), session.RemoteAddr().String())
 			svr.ctlMu.Unlock()
 			break
 		}
@@ -179,6 +183,8 @@ func (svr *Service) keepControllerWorking() {
 
 	for {
 		<-svr.ctl.ClosedDoneCh()
+		svr.GracefulClose(time.Second)
+		return
 		if atomic.LoadUint32(&svr.exit) != 0 {
 			return
 		}
@@ -221,7 +227,7 @@ func (svr *Service) keepControllerWorking() {
 			// reconnect success, init delayTime
 			delayTime = time.Second
 
-			ctl := NewControl(svr.ctx, svr.runID, conn, session, svr.cfg, svr.pxyCfgs, svr.visitorCfgs, svr.serverUDPPort, svr.authSetter)
+			ctl := NewControl(svr.ctx, svr.runID, conn, session, svr.cfg, svr.pxyCfgs, svr.visitorCfgs, svr.serverUDPPort, svr.authSetter, svr.callback)
 			ctl.Run()
 			svr.ctlMu.Lock()
 			if svr.ctl != nil {

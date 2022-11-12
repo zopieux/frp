@@ -55,10 +55,10 @@ type Control struct {
 	session *fmux.Session
 
 	// put a message in this channel to send it over control connection to server
-	sendCh chan (msg.Message)
+	sendCh chan msg.Message
 
 	// read from this channel to get the next message sent by server
-	readCh chan (msg.Message)
+	readCh chan msg.Message
 
 	// goroutines can block by reading from this channel, it will be closed only in reader() when control connection is closed
 	closedCh chan struct{}
@@ -85,6 +85,8 @@ type Control struct {
 
 	// sets authentication based on selected method
 	authSetter auth.Setter
+
+	callback FrpCallback
 }
 
 func NewControl(ctx context.Context, runID string, conn net.Conn, session *fmux.Session,
@@ -93,6 +95,7 @@ func NewControl(ctx context.Context, runID string, conn net.Conn, session *fmux.
 	visitorCfgs map[string]config.VisitorConf,
 	serverUDPPort int,
 	authSetter auth.Setter,
+	callback FrpCallback,
 ) *Control {
 	// new xlog instance
 	ctl := &Control{
@@ -112,6 +115,7 @@ func NewControl(ctx context.Context, runID string, conn net.Conn, session *fmux.
 		xl:                 xlog.FromContextSafe(ctx),
 		ctx:                ctx,
 		authSetter:         authSetter,
+		callback:           callback,
 	}
 	ctl.pm = proxy.NewManager(ctl.ctx, ctl.sendCh, clientCfg, serverUDPPort)
 
@@ -128,6 +132,10 @@ func (ctl *Control) Run() {
 
 	// start all visitors
 	go ctl.vm.Run()
+}
+
+func (ctl *Control) Status() []*proxy.WorkingStatus {
+	return ctl.pm.GetAllProxyStatus()
 }
 
 func (ctl *Control) HandleReqWorkConn(inMsg *msg.ReqWorkConn) {
@@ -172,8 +180,10 @@ func (ctl *Control) HandleNewProxyResp(inMsg *msg.NewProxyResp) {
 	// Start a new proxy handler if no error got
 	err := ctl.pm.StartProxy(inMsg.ProxyName, inMsg.RemoteAddr, inMsg.Error)
 	if err != nil {
-		xl.Warn("[%s] start error: %v", inMsg.ProxyName, err)
+		xl.Warn("[%s] start error, I'll now die: %v", inMsg.ProxyName, err)
+		_ = ctl.GracefulClose(time.Millisecond*250)
 	} else {
+		ctl.callback.Connected(inMsg.ProxyName, inMsg.RemoteAddr)
 		xl.Info("[%s] start proxy success", inMsg.ProxyName)
 	}
 }
